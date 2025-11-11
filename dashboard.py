@@ -8,11 +8,10 @@ import folium
 from streamlit_folium import st_folium
 
 # =============================================================================
-# DATA MANAGEMENT (MULTI-CITY SUPPORT)
+# DATA MANAGEMENT
 # =============================================================================
 DATA_FILE = Path("gx_dashboard_data.csv")
 
-# Default data per city
 DEFAULT_DATA_PER_CITY = {
     "New York": {
         "hcp_educated": 28, "hcp_family": 19, "hcp_internal": 18, "hcp_general": 28,
@@ -44,7 +43,6 @@ DEFAULT_DATA_PER_CITY = {
     },
 }
 
-# City coordinates
 CITY_COORDS = {
     "New York": (40.7128, -74.0060),
     "Los Angeles": (34.0522, -118.2437),
@@ -103,33 +101,17 @@ def create_city_map(data):
     return m
 
 # =============================================================================
-# UI COMPONENTS
+# UI
 # =============================================================================
 def render_metric_card(label, value, color="#1f77b4", bg_color="#f0f8ff"):
     st.markdown(f"""
-        <div style='
-            text-align: center;
-            background-color: {bg_color};
-            border-radius: 12px;
-            padding: 20px 12px;
-            margin: 8px 0;
-            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
-            min-height: 150px;
-            height: 150px;
-            display: flex;
-            flex-direction: column;
-            justify-content: center;
-            align-items: center;
-            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-        '>
+        <div style='text-align: center; background-color: {bg_color}; border-radius: 12px; padding: 20px; margin: 8px 0; box-shadow: 0 2px 4px rgba(0,0,0,0.1); min-height: 150px; display: flex; flex-direction: column; justify-content: center; font-family: sans-serif;'>
             <div style='font-size: 13px; color: #444; font-weight: 600; margin-bottom: 8px;'>{label}</div>
             <div style='font-size: 36px; font-weight: bold; color: {color};'>{value}%</div>
         </div>
     """, unsafe_allow_html=True)
 
-# ----------------------------------------------------------------------
 # RENDER FUNCTIONS
-# ----------------------------------------------------------------------
 def render_hcp_section(data, city):
     city_data = get_city_data(data, city)
     st.markdown("### TOTAL HCPs EDUCATED in GX")
@@ -153,7 +135,6 @@ def render_hcp_section(data, city):
         if f"{city}_{key}" in st.session_state and st.session_state[f"{city}_{key}"] != city_data.get(key, 0):
             update_value(data, city, key, st.session_state[f"{city}_{key}"])
 
-    # Practice Type Bar Chart
     practice_df = pd.DataFrame({
         "Type": ["Family", "Internal", "General"],
         "Count": [practice_data["hcp_family"], practice_data["hcp_internal"], practice_data["hcp_general"]]
@@ -191,7 +172,6 @@ def render_demographics_section(data, city):
         st.warning(f"Sum: {total}%. Normalizing...")
         demo_df["Percent"] = (demo_df["Percent"] / total * 100).round(1)
 
-    # Demographics Bar Chart
     fig_demo = px.bar(demo_df, x="Percent", y="Group", orientation='h', color="Group", text="Percent")
     fig_demo.update_layout(showlegend=False, height=240, margin=dict(l=0, r=0, t=0, b=0))
     st.plotly_chart(fig_demo, use_container_width=True)
@@ -241,7 +221,7 @@ def render_knowledge_intent_section(data, city):
     ]
     for dkey, skey, label, col, bg, col_obj in metrics:
         with col_obj:
-            val = st.number_input(f"{label.gsub('<br>', ' ')} %", min_value=0, max_value=100, value=int(float(city_data.get(dkey, 0))), key=f"{city}_{skey}", label_visibility="collapsed")
+            val = st.number_input(f"{label.replace('<br>', ' ')} %", min_value=0, max_value=100, value=int(float(city_data.get(dkey, 0))), key=f"{city}_{skey}", label_visibility="collapsed")
             if f"{city}_{skey}" in st.session_state and st.session_state[f"{city}_{skey}"] != city_data.get(dkey):
                 update_value(data, city, dkey, st.session_state[f"{city}_{skey}"])
             render_metric_card(label, val, col, bg)
@@ -250,29 +230,19 @@ def render_ldlc_matrix(data, city):
     city_data = get_city_data(data, city)
     st.markdown("#### LDL-c (mg/dL) Distribution")
     matrix = pd.DataFrame({
-        "Range": ["0-54", "55-70", "70-99", "100-139", "140-189", "greater than or equal to 190"],
+        "Range": ["0-54", "55-70", "70-99", "100-139", "140-189", "≥190"],
         "Value": [city_data.get("ldlc_0_54", 0), city_data.get("ldlc_55_70", 0), city_data.get("ldlc_70_99", 0),
                   city_data.get("ldlc_100_139", 0), city_data.get("ldlc_140_189", 0), city_data.get("ldlc_190_plus", 0)]
     })
 
-    gb = AgGrid(
-        matrix,
-        editable=True,
-        fit_columns_on_grid_load=True,
-        height=220,
-        update_mode=GridUpdateMode.MODEL_CHANGED,
-        data_return_mode=DataReturnMode.AS_INPUT,
-    )
+    gb = AgGrid(matrix, editable=True, fit_columns_on_grid_load=True, height=220, update_mode=GridUpdateMode.MODEL_CHANGED, data_return_mode=DataReturnMode.AS_INPUT)
     edited = gb["data"]
 
     total = edited["Value"].sum()
     if total != 100 and total > 0:
         edited["Value"] = (edited["Value"] / total * 100).round(2)
 
-    range_to_key = {
-        "0-54": "ldlc_0_54", "55-70": "ldlc_55_70", "70-99": "ldlc_70_99",
-        "100-139": "ldlc_100_139", "140-189": "ldlc_140_189", "greater than or equal to 190": "ldlc_190_plus"
-    }
+    range_to_key = {"0-54": "ldlc_0_54", "55-70": "ldlc_55_70", "70-99": "ldlc_70_99", "100-139": "ldlc_100_139", "140-189": "ldlc_140_189", "≥190": "ldlc_190_plus"}
     for _, row in edited.iterrows():
         key = range_to_key[row["Range"]]
         if city_data.get(key) != row["Value"]:
@@ -282,12 +252,11 @@ def render_ldlc_matrix(data, city):
         if val <= 0.75: return "background-color: #d4edda"
         elif val <= 1.25: return "background-color: #c3e6cb"
         else: return "background-color: #bbe5b3"
-
     styled = edited.style.applymap(color_ldlc, subset=["Value"])
     st.table(styled)
 
 # =============================================================================
-# MAIN APP
+# MAIN
 # =============================================================================
 def main():
     st.set_page_config(page_title="GX Activations Dashboard", layout="wide")
@@ -297,7 +266,6 @@ def main():
     st.markdown("---")
 
     selected_city = st.selectbox("Select City", options=list(CITY_COORDS.keys()), index=0)
-
     col_title, col_toggle = st.columns([6, 1])
     with col_toggle:
         dark_mode = st.toggle("Dark Mode", value=False)
@@ -307,21 +275,9 @@ def main():
         time.sleep(30)
         st.rerun()
 
-    # Download
-    csv_data = pd.Series({
-        f"{city}__{k}": v 
-        for city, metrics in data.items() 
-        for k, v in metrics.items()
-    }).to_csv().encode()
+    csv_data = pd.Series({f"{city}__{k}": v for city, metrics in data.items() for k, v in metrics.items()}).to_csv().encode()
+    st.download_button("Download All Cities Data", data=csv_data, file_name=f"gx_dashboard_all_cities_{pd.Timestamp.now().strftime('%Y%m%d_%H%M')}.csv", mime="text/csv")
 
-    st.download_button(
-        "Download All Cities Data",
-        data=csv_data,
-        file_name=f"gx_dashboard_all_cities_{pd.Timestamp.now().strftime('%Y%m%d_%H%M')}.csv",
-        mime="text/csv"
-    )
-
-    # Map
     st.markdown("### City Activation Map")
     city_map = create_city_map(data)
     st_folium(city_map, width=700, height=400)
@@ -335,7 +291,6 @@ def main():
         render_age_gender_section(data, selected_city)
         st.markdown("---")
         render_knowledge_intent_section(data, selected_city)
-
     with col_right:
         render_hcp_section(data, selected_city)
         st.markdown("---")
