@@ -237,11 +237,16 @@ def main():
         time.sleep(30)
         st.rerun()
 
-    csv_data = pd.Series({f"{city}_{k}": v for city, metrics in data.items() for k, v in metrics.items()}).to_csv().encode()
+    csv_data = pd.Series({
+        f"{city}__{k}": v 
+        for city, metrics in data.items() 
+        for k, v in metrics.items()
+    }).to_csv().encode()
+
     st.download_button(
         "Download All Cities Data",
         data=csv_data,
-        file_name=f"gx_dashboard_{pd.Timestamp.now().strftime('%Y%m%d_%H%M')}.csv",
+        file_name=f"gx_dashboard_all_cities_{pd.Timestamp.now().strftime('%Y%m%d_%H%M')}.csv",
         mime="text/csv"
     )
 
@@ -277,4 +282,5 @@ def main():
 # =============================================================================
 if __name__ == "__main__":
     main()
+
 
