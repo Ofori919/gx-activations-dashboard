@@ -44,7 +44,7 @@ DEFAULT_DATA_PER_CITY = {
     },
 }
 
-# City coordinates for map
+# City coordinates
 CITY_COORDS = {
     "New York": (40.7128, -74.0060),
     "Los Angeles": (34.0522, -118.2437),
@@ -54,11 +54,9 @@ def load_data():
     if DATA_FILE.exists():
         df = pd.read_csv(DATA_FILE, index_col=0, header=None).squeeze("columns")
         data_dict = df.to_dict()
-        # Migrate old single-city format
         if "hcp_educated" in data_dict and len(data_dict) < 50:
             data_dict = {"New York": data_dict}
             save_data(data_dict)
-        # Reconstruct nested dict
         nested = {}
         for key, val in data_dict.items():
             if "__" in key:
@@ -86,7 +84,7 @@ def update_value(data, city, key, value):
     save_data(data)
 
 # =============================================================================
-# MAP SECTION
+# MAP
 # =============================================================================
 @st.cache_data
 def create_city_map(data):
@@ -130,7 +128,7 @@ def render_metric_card(label, value, color="#1f77b4", bg_color="#f0f8ff"):
     """, unsafe_allow_html=True)
 
 # ----------------------------------------------------------------------
-# RENDER FUNCTIONS (CITY-AWARE)
+# RENDER FUNCTIONS
 # ----------------------------------------------------------------------
 def render_hcp_section(data, city):
     city_data = get_city_data(data, city)
@@ -155,6 +153,7 @@ def render_hcp_section(data, city):
         if f"{city}_{key}" in st.session_state and st.session_state[f"{city}_{key}"] != city_data.get(key, 0):
             update_value(data, city, key, st.session_state[f"{city}_{key}"])
 
+    # Practice Type Bar Chart
     practice_df = pd.DataFrame({
         "Type": ["Family", "Internal", "General"],
         "Count": [practice_data["hcp_family"], practice_data["hcp_internal"], practice_data["hcp_general"]]
@@ -188,10 +187,11 @@ def render_demographics_section(data, city):
         "Percent": list(demo_inputs.values())
     })
     total = demo_df["Percent"].sum()
-    if total != 100:
+    if total != 100 and total > 0:
         st.warning(f"Sum: {total}%. Normalizing...")
         demo_df["Percent"] = (demo_df["Percent"] / total * 100).round(1)
 
+    # Demographics Bar Chart
     fig_demo = px.bar(demo_df, x="Percent", y="Group", orientation='h', color="Group", text="Percent")
     fig_demo.update_layout(showlegend=False, height=240, margin=dict(l=0, r=0, t=0, b=0))
     st.plotly_chart(fig_demo, use_container_width=True)
@@ -241,7 +241,7 @@ def render_knowledge_intent_section(data, city):
     ]
     for dkey, skey, label, col, bg, col_obj in metrics:
         with col_obj:
-            val = st.number_input(f"{label.replace('<br>', ' ')} %", min_value=0, max_value=100, value=int(float(city_data.get(dkey, 0))), key=f"{city}_{skey}", label_visibility="collapsed")
+            val = st.number_input(f"{label.gsub('<br>', ' ')} %", min_value=0, max_value=100, value=int(float(city_data.get(dkey, 0))), key=f"{city}_{skey}", label_visibility="collapsed")
             if f"{city}_{skey}" in st.session_state and st.session_state[f"{city}_{skey}"] != city_data.get(dkey):
                 update_value(data, city, dkey, st.session_state[f"{city}_{skey}"])
             render_metric_card(label, val, col, bg)
@@ -250,7 +250,7 @@ def render_ldlc_matrix(data, city):
     city_data = get_city_data(data, city)
     st.markdown("#### LDL-c (mg/dL) Distribution")
     matrix = pd.DataFrame({
-        "Range": ["0-54", "55-70", "70-99", "100-139", "140-189", "≥190"],
+        "Range": ["0-54", "55-70", "70-99", "100-139", "140-189", "greater than or equal to 190"],
         "Value": [city_data.get("ldlc_0_54", 0), city_data.get("ldlc_55_70", 0), city_data.get("ldlc_70_99", 0),
                   city_data.get("ldlc_100_139", 0), city_data.get("ldlc_140_189", 0), city_data.get("ldlc_190_plus", 0)]
     })
@@ -271,7 +271,7 @@ def render_ldlc_matrix(data, city):
 
     range_to_key = {
         "0-54": "ldlc_0_54", "55-70": "ldlc_55_70", "70-99": "ldlc_70_99",
-        "100-139": "ldlc_100_139", "140-189": "ldlc_140_189", "≥190": "ldlc_190_plus"
+        "100-139": "ldlc_100_139", "140-189": "ldlc_140_189", "greater than or equal to 190": "ldlc_190_plus"
     }
     for _, row in edited.iterrows():
         key = range_to_key[row["Range"]]
@@ -287,7 +287,7 @@ def render_ldlc_matrix(data, city):
     st.table(styled)
 
 # =============================================================================
-# MAIN APP MORNING
+# MAIN APP
 # =============================================================================
 def main():
     st.set_page_config(page_title="GX Activations Dashboard", layout="wide")
@@ -307,7 +307,7 @@ def main():
         time.sleep(30)
         st.rerun()
 
-    # Download all cities
+    # Download
     csv_data = pd.Series({
         f"{city}__{k}": v 
         for city, metrics in data.items() 
