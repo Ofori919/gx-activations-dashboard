@@ -155,7 +155,8 @@ def render_age_gender_section(data):
         if "male" in st.session_state and st.session_state.male != data.get("gender_male"):
             update_value(data, "gender_male", st.session_state.male)
         female = 100 - male
-        fig_gender = = px.pie(values=[male, female], names=["Male", "Female"], hole=0.4, color_discrete_sequence=["#1f77b4", "#ff7f0e"])
+        # FIXED: Removed double equals
+        fig_gender = px.pie(values=[male, female], names=["Male", "Female"], hole=0.4, color_discrete_sequence=["#1f77b4", "#ff7f0e"])
         fig_gender.update_traces(textposition="inside", textinfo="percent+label", textfont_size=18, pull=[0.07, 0.07])
         fig_gender.update_layout(height=560, width=560, margin=dict(l=20, r=20, t=40, b=20),
                                  legend=dict(orientation="v", yanchor="middle", y=0.5, xanchor="left", x=1.02, font=dict(size=14)))
@@ -234,11 +235,9 @@ def main():
     with col_refresh:
         auto_refresh = st.checkbox("Auto-refresh every 30s", value=True)
 
-    # Countdown timer placeholder
     timer_placeholder = st.empty()
 
     if auto_refresh:
-        # Initialize or get last refresh time
         if 'last_refresh' not in st.session_state:
             st.session_state.last_refresh = time.time()
         if 'refresh_countdown' not in st.session_state:
@@ -253,7 +252,7 @@ def main():
             st.rerun()
         else:
             st.session_state.refresh_countdown = remaining
-            timer_placeholder.markdown(f"🔄 **Refreshing in {remaining}s...**")
+            timer_placeholder.markdown(f"**Refreshing in {remaining}s...**")
 
     # === DOWNLOAD BUTTON ===
     with col_download:
