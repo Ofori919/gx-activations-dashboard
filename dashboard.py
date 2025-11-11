@@ -3,6 +3,7 @@ import pandas as pd
 import plotly.express as px
 from pathlib import Path
 from st_aggrid import AgGrid, GridUpdateMode, DataReturnMode
+import time
 
 # =============================================================================
 # DATA MANAGEMENT
@@ -67,7 +68,7 @@ def render_metric_card(label, value, color="#1f77b4", bg_color="#f0f8ff"):
 def render_hcp_section(data):
     st.markdown("### TOTAL HCPs EDUCATED in GX")
     hcp_educated = st.number_input("Running Total", min_value=0, value=int(float(data["hcp_educated"])), key="hcp_educated_input")
-    if st.session_state.hcp_educated_input != data["hcp_educated"]:
+    if "hcp_educated_input" in st.session_state and st.session_state.hcp_educated_input != data["hcp_educated"]:
         update_value(data, "hcp_educated", st.session_state.hcp_educated_input)
 
     c1, c2, c3, c4 = st.columns(4)
@@ -83,7 +84,7 @@ def render_hcp_section(data):
         "hcp_general":  st.number_input("General",  min_value=0, value=int(float(data["hcp_general"])),  key="hcp_general"),
     }
     for key in practice_data:
-        if st.session_state[key] != data[key]:
+        if key in st.session_state and st.session_state[key] != data[key]:
             update_value(data, key, st.session_state[key])
 
     practice_df = pd.DataFrame({
@@ -100,7 +101,7 @@ def render_hcp_section(data):
 def render_attendees_section(data):
     st.markdown("### TOTAL ATTENDEES EDUCATED in GX")
     attendees = st.number_input("Running Total", min_value=0, value=int(float(data["attendees_educated"])), key="attendees")
-    if st.session_state.attendees != data["attendees_educated"]:
+    if "attendees" in st.session_state and st.session_state.attendees != data["attendees_educated"]:
         update_value(data, "attendees_educated", st.session_state.attendees)
 
 def render_demographics_section(data):
@@ -112,7 +113,7 @@ def render_demographics_section(data):
         "demo_other":    st.number_input("Other %",     min_value=0, max_value=100, value=int(float(data["demo_other"])),    key="demo_o"),
     }
     for (key, _), sk in zip(demo_inputs.items(), ["demo_b", "demo_h", "demo_w", "demo_o"]):
-        if st.session_state[sk] != data[key]:
+        if sk in st.session_state and st.session_state[sk] != data[key]:
             update_value(data, key, st.session_state[sk])
 
     demo_df = pd.DataFrame({
@@ -138,7 +139,7 @@ def render_age_gender_section(data):
             "age_18_34":   st.number_input("18-34 yrs", min_value=0, value=int(float(data.get("age_18_34", 0))), key="age18"),
         }
         for k, sk in zip(age_inputs, ["age55", "age35", "age18"]):
-            if st.session_state[sk] != data.get(k):
+            if sk in st.session_state and st.session_state[sk] != data.get(k):
                 update_value(data, k, st.session_state[sk])
 
         age_df = pd.DataFrame({"Age": ["55+ yrs", "35-54 yrs", "18-34 yrs"], "Count": list(age_inputs.values())})
@@ -151,7 +152,7 @@ def render_age_gender_section(data):
     with col_gender:
         st.markdown("**Gender**")
         male = st.number_input("Male %", min_value=0, max_value=100, value=int(float(data.get("gender_male", 0))), key="male")
-        if st.session_state.male != data.get("gender_male"):
+        if "male" in st.session_state and st.session_state.male != data.get("gender_male"):
             update_value(data, "gender_male", st.session_state.male)
         female = 100 - male
         fig_gender = px.pie(values=[male, female], names=["Male", "Female"], hole=0.4, color_discrete_sequence=["#1f77b4", "#ff7f0e"])
@@ -172,12 +173,12 @@ def render_knowledge_intent_section(data):
     for dkey, skey, label, col, bg, col_obj in metrics:
         with col_obj:
             val = st.number_input(f"{label.replace('<br>', ' ')} %", min_value=0, max_value=100, value=int(float(data[dkey])), key=skey, label_visibility="collapsed")
-            if st.session_state[skey] != data[dkey]:
+            if skey in st.session_state and st.session_state[skey] != data[dkey]:
                 update_value(data, dkey, st.session_state[skey])
             render_metric_card(label, val, col, bg)
 
 # ----------------------------------------------------------------------
-# LDL-C MATRIX (ONLY ONCE!)
+# LDL-C MATRIX
 # ----------------------------------------------------------------------
 def render_ldlc_matrix(data):
     st.markdown("#### LDL-c (mg/dL) Distribution")
@@ -185,31 +186,90 @@ def render_ldlc_matrix(data):
         "Range": ["0-54", "55-70", "70-99", "100-139", "140-189", "≥190"],
         "Value": [data["ldlc_0_54"], data["ldlc_55_70"], data["ldlc_70_99"], data["ldlc_100_139"], data["ldlc_140_189"], data["ldlc_190_plus"]]
     })
-    gb = AgGrid(matrix, editable=True, fit_columns_on_grid_load=True, height=200,
-                update_mode=GridUpdateMode.MODEL_CHANGED, data_return_mode=DataReturnMode.AS_INPUT)
+
+    gb = AgGrid(
+        matrix,
+        editable=True,
+        fit_columns_on_grid_load=True,
+        height=220,
+        update_mode=GridUpdateMode.MODEL_CHANGED,
+        data_return_mode=DataReturnMode.AS_INPUT,
+    )
     edited = gb["data"]
+
+    # Normalize to 100%
+    total = edited["Value"].sum()
+    if total != 100 and total > 0:
+        edited["Value"] = (edited["Value"] / total * 100).round(2)
+
+    # Save back
+    range_to_key = {
+        "0-54": "ldlc_0_54", "55-70": "ldlc_55_70", "70-99": "ldlc_70_99",
+        "100-139": "ldlc_100_139", "140-189": "ldlc_140_189", "≥190": "ldlc_190_plus"
+    }
     for _, row in edited.iterrows():
-        key = f"ldlc_{row['Range'].replace('≥', 'ge').replace('-', '_').lower()}"
-        if key == "ldlc_ge190": key = "ldlc_190_plus"
-        if key in data:
+        key = range_to_key[row["Range"]]
+        if data.get(key) != row["Value"]:
             update_value(data, key, row["Value"])
 
+    # Styling
     def color_ldlc(val):
-        if val <= 0.75: return "background-color: #d4edda"
+        if val <= 0.75:   return "background-color: #d4edda"
         elif val <= 1.25: return "background-color: #c3e6cb"
-        else: return "background-color: #bbe5b3"
+        else:             return "background-color: #bbe5b3"
 
     styled = edited.style.applymap(color_ldlc, subset=["Value"])
     st.table(styled)
 
+# =============================================================================
+# MAIN APP
+# =============================================================================
+def main():
+    st.set_page_config(page_title="GX Activations Dashboard", layout="wide")
+    data = load_data()
 
+    st.markdown("<h1 style='text-align: center;'>GX ACTIVATIONS (CITIES) – Real-time Dashboard</h1>", unsafe_allow_html=True)
+    st.markdown("---")
 
+    col_title, col_toggle = st.columns([6, 1])
+    with col_toggle:
+        dark_mode = st.toggle("Dark Mode", value=False)
+
+    # ----- AUTO-REFRESH (compatible with all Streamlit versions) -----
+    refresh = st.checkbox("Auto-refresh (30s)", value=True)
+    if refresh:
+        time.sleep(30)          # wait 30 seconds
+        st.rerun()              # re-execute the script
+
+    # ----- DOWNLOAD BUTTON -----
+    csv_data = pd.Series(data).to_csv().encode()
+    st.download_button(
+        "Download Data",
+        data=csv_data,
+        file_name=f"gx_dashboard_{pd.Timestamp.now().strftime('%Y%m%d_%H%M')}.csv",
+        mime="text/csv"
+    )
+
+    # ----- LAYOUT -----
+    col_left, col_right = st.columns([1, 1])
+    with col_left:
+        render_attendees_section(data)
+        st.markdown("---")
+        render_demographics_section(data)
+        st.markdown("---")
+        render_age_gender_section(data)
+        st.markdown("---")
+        render_knowledge_intent_section(data)
+
+    with col_right:
+        render_hcp_section(data)
+        st.markdown("---")
+        render_ldlc_matrix(data)
 
     st.caption("*All percentages reflect the percent increase from pre-survey to post-survey results.")
 
 # =============================================================================
-# RUN (ONLY ONCE!)
+# RUN
 # =============================================================================
 if __name__ == "__main__":
-
     main()
