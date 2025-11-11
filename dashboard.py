@@ -178,13 +178,16 @@ def render_knowledge_intent_section(data):
             render_metric_card(label, val, col, bg)
 
 # ----------------------------------------------------------------------
-# LDL-C MATRIX
+# LDL-C MATRIX (FIXED: Full 2-decimal display)
 # ----------------------------------------------------------------------
 def render_ldlc_matrix(data):
     st.markdown("#### LDL-c (mg/dL) Distribution")
     matrix = pd.DataFrame({
-        "Range": ["0-54", "55-70", "70-99", "100-139", "140-189", ">=190"],  # FIXED: Consistent label
-        "Value": [data["ldlc_0_54"], data["ldlc_55_70"], data["ldlc_70_99"], data["ldlc_100_139"], data["ldlc_140_189"], data["ldlc_190_plus"]]
+        "Range": ["0-54", "55-70", "70-99", "100-139", "140-189", ">=190"],
+        "Value": [
+            data["ldlc_0_54"], data["ldlc_55_70"], data["ldlc_70_99"],
+            data["ldlc_100_139"], data["ldlc_140_189"], data["ldlc_190_plus"]
+        ]
     })
     gb = AgGrid(
         matrix,
@@ -201,7 +204,7 @@ def render_ldlc_matrix(data):
 
     range_to_key = {
         "0-54": "ldlc_0_54", "55-70": "ldlc_55_70", "70-99": "ldlc_70_99",
-        "100-139": "ldlc_100_139", "140-189": "ldlc_140_189", ">=190": "ldlc_190_plus"  # FIXED: Match label
+        "100-139": "ldlc_100_139", "140-189": "ldlc_140_189", ">=190": "ldlc_190_plus"
     }
     for _, row in edited.iterrows():
         key = range_to_key[row["Range"]]
@@ -212,9 +215,14 @@ def render_ldlc_matrix(data):
         if val <= 0.75: return "background-color: #d4edda"
         elif val <= 1.25: return "background-color: #c3e6cb"
         else: return "background-color: #bbe5b3"
-    
-    # FIXED: Force 2 decimal places to prevent truncation
-    styled = edited.style.format({'Value': '{:.2f}'}).applymap(color_ldlc, subset=["Value"])
+
+    # Force 2-decimal formatting to prevent truncation
+    styled = (
+        edited
+        .style
+        .format({"Value": "{:.2f}"})   # <-- Ensures 25.64 shows fully
+        .applymap(color_ldlc, subset=["Value"])
+    )
     st.table(styled)
 
 # =============================================================================
