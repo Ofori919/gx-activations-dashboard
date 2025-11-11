@@ -202,49 +202,8 @@ def render_ldlc_matrix(data):
     styled = edited.style.applymap(color_ldlc, subset=["Value"])
     st.table(styled)
 
-# =============================================================================
-# MAIN APP — UPGRADED (ONLY ONCE!)
-# =============================================================================
-def main():
-    st.set_page_config(page_title="GX Activations Dashboard", layout="wide")
-    data = load_data()
 
-    st.markdown("<h1 style='text-align: center;'>GX ACTIVATIONS (CITIES) – Real-time Dashboard</h1>", unsafe_allow_html=True)
-    st.markdown("---")
 
-    col_title, col_toggle = st.columns([6, 1])
-    with col_toggle:
-        dark_mode = st.toggle("Dark Mode", value=False, key="dark_mode")
-
-    if dark_mode:
-        st._config.set_option("theme.base", "dark")
-        st._config.set_option("theme.backgroundColor", "#0e1117")
-        st._config.set_option("theme.primaryColor", "#ff6b6b")
-    else:
-        st._config.set_option("theme.base", "light")
-
-    csv_data = pd.Series(data).to_csv().encode()
-    st.download_button("Download Data", data=csv_data,
-                       file_name=f"gx_dashboard_{pd.Timestamp.now().strftime('%Y%m%d_%H%M')}.csv", mime="text/csv")
-
-    if st.checkbox("Auto-refresh (30s)", value=True):
-        import time
-        time.sleep(30)
-        st.rerun()
-
-    col_left, col_right = st.columns([1, 1])
-    with col_left:
-        render_attendees_section(data)
-        st.markdown("---")
-        render_demographics_section(data)
-        st.markdown("---")
-        render_age_gender_section(data)
-        st.markdown("---")
-        render_knowledge_intent_section(data)
-    with col_right:
-        render_hcp_section(data)
-        st.markdown("---")
-        render_ldlc_matrix(data)
 
     st.caption("*All percentages reflect the percent increase from pre-survey to post-survey results.")
 
@@ -252,4 +211,5 @@ def main():
 # RUN (ONLY ONCE!)
 # =============================================================================
 if __name__ == "__main__":
+
     main()
