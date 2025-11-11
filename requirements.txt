@@ -4,4 +4,3 @@ pandas
 plotly
 folium
 streamlit-folium
-geopy
