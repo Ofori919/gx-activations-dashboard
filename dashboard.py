@@ -1,14 +1,23 @@
+
 import streamlit as st
 import pandas as pd
 import plotly.express as px
-from pathlib import Path
-from st_aggrid import AgGrid, GridUpdateMode, DataReturnMode
 import time
+import os
+import json
+from typing import Dict, Any
 
-# =============================================================================
-# DATA MANAGEMENT
-# =============================================================================
-DATA_FILE = Path("gx_dashboard_data.csv")
+# Third-party dependencies that must appear in requirements.txt
+from st_aggrid import AgGrid, GridUpdateMode, DataReturnMode
+import gspread
+from google.oauth2.service_account import Credentials
+
+# ------------------------------
+# CONFIG / CONSTANTS
+# ------------------------------
+SHEET_ID = "1IHHtOFCFs6SdE88L3ZrUfbg_rmXgF8kHrhbmE4Yk3Y0"
+WORKSHEET_NAME = "GX Dashboard Data"
+
 DEFAULT_DATA = {
     "hcp_educated": 28, "hcp_family": 19, "hcp_internal": 18, "hcp_general": 28,
     "hcp_md_do": 75, "hcp_np_pa": 25,
@@ -21,56 +30,158 @@ DEFAULT_DATA = {
     "aware_ldlc": 88, "understand_risk": 84, "intent_test": 91, "intent_followup": 79,
     "ldlc_0_54": 0.54, "ldlc_55_70": 0.70, "ldlc_70_99": 0.99,
     "ldlc_100_139": 1.39, "ldlc_140_189": 1.89, "ldlc_190_plus": 1.90,
-    "ldlc_0_75": 0.75, "ldlc_76_125": 1.25, "ldlc_126_plus": 1.26,
 }
 
-def load_data():
-    if DATA_FILE.exists():
-        df = pd.read_csv(DATA_FILE, index_col=0, header=None).squeeze("columns")
-        return df.to_dict()
-    return DEFAULT_DATA.copy()
+SCOPES = ["https://www.googleapis.com/auth/spreadsheets"]
 
-def save_data(data):
-    pd.Series(data).to_csv(DATA_FILE, header=False)
+# ------------------------------
+# AUTH / GSPREAD HELPERS
+# ------------------------------
 
-def update_value(data, key, value):
-    data[key] = value
-    save_data(data)
+def _creds_from_st_secrets() -> Credentials | None:
+    """Return google Credentials object from st.secrets if available."""
+    try:
+        if "gcp_service_account" in st.secrets:
+            sa = st.secrets["gcp_service_account"]
+            # st.secrets might return a TOML-like mapping or a JSON string
+            if isinstance(sa, str):
+                sa = json.loads(sa)
+            creds = Credentials.from_service_account_info(sa, scopes=SCOPES)
+            return creds
+    except Exception as e:
+        st.error(f"Error parsing st.secrets gcp_service_account: {e}")
+    return None
 
-# =============================================================================
-# UI COMPONENTS
-# =============================================================================
-def render_metric_card(label, value, color="#1f77b4", bg_color="#f0f8ff"):
+
+def _creds_from_file_env() -> Credentials | None:
+    """Try loading credentials from GOOGLE_APPLICATION_CREDENTIALS env var or local file.
+    Returns None if no usable file was found.
+    """
+    json_path = os.environ.get("GOOGLE_APPLICATION_CREDENTIALS", "service_account.json")
+    if not os.path.exists(json_path):
+        return None
+    try:
+        creds = Credentials.from_service_account_file(json_path, scopes=SCOPES)
+        return creds
+    except Exception as e:
+        st.error(f"Failed loading credentials from file {json_path}: {e}")
+        return None
+
+
+def get_gspread_client() -> gspread.Client:
+    """Return an authorized gspread client.
+
+    Priority:
+    1) st.secrets['gcp_service_account'] (recommended for Streamlit Cloud)
+    2) GOOGLE_APPLICATION_CREDENTIALS env var or service_account.json (local/dev)
+    """
+    # 1) try st.secrets
+    creds = _creds_from_st_secrets()
+    if creds is not None:
+        return gspread.authorize(creds)
+
+    # 2) try env / local file
+    creds = _creds_from_file_env()
+    if creds is not None:
+        return gspread.authorize(creds)
+
+    # 3) nothing worked
+    raise RuntimeError("No Google service account credentials found. Add credentials to st.secrets or set GOOGLE_APPLICATION_CREDENTIALS to a local JSON file.")
+
+# ------------------------------
+# DATA IO
+# ------------------------------
+
+@st.cache_data(ttl=60)
+def load_data_from_sheet() -> Dict[str, Any]:
+    """Load key/value pairs from Google Sheet. Cached for 60 seconds.
+
+    Returns DEFAULT_DATA copy on errors.
+    """
+    try:
+        client = get_gspread_client()
+        sh = client.open_by_key(SHEET_ID)
+        ws = sh.worksheet(WORKSHEET_NAME)
+        rows = ws.get_all_values()  # returns list of lists
+        # Expect header row: [key, value]
+        if len(rows) < 2:
+            return DEFAULT_DATA.copy()
+
+        data: Dict[str, Any] = {}
+        for row in rows[1:]:
+            if len(row) < 2:
+                continue
+            key = row[0]
+            val = row[1]
+            if key == "":
+                continue
+            # try converting numeric values
+            try:
+                if val is None or val == "":
+                    parsed = ""
+                elif isinstance(val, (int, float)):
+                    parsed = val
+                elif "." in val:
+                    parsed = float(val)
+                else:
+                    parsed = int(val)
+            except Exception:
+                parsed = val
+            data[key] = parsed
+        # combine with defaults for missing keys
+        out = DEFAULT_DATA.copy()
+        out.update(data)
+        return out
+    except Exception as e:
+        st.error(f"⚠️ Could not load data from Google Sheets: {e}")
+        return DEFAULT_DATA.copy()
+
+
+def save_data_to_sheet(data: Dict[str, Any]) -> bool:
+    """Save the provided dict to Google Sheet as two-column rows (key, value).
+
+    This function writes all rows in a single batch update for speed.
+    Returns True on success, False on failure.
+    """
+    try:
+        client = get_gspread_client()
+        sh = client.open_by_key(SHEET_ID)
+        ws = sh.worksheet(WORKSHEET_NAME)
+        rows = [["key", "value"]]
+        for k, v in data.items():
+            rows.append([k, str(v)])
+        # Write starting from A1
+        ws.clear()
+        ws.update("A1", rows)
+        # Invalidate cache
+        load_data_from_sheet.clear()
+        return True
+    except Exception as e:
+        st.error(f"⚠️ Could not save data to Google Sheets: {e}")
+        return False
+
+# ------------------------------
+# UI HELPERS
+# ------------------------------
+
+def render_metric_card(label: str, value: Any, color: str = "#1f77b4", bg_color: str = "#f0f8ff"):
     st.markdown(f"""
-        <div style='
-            text-align: center;
-            background-color: {bg_color};
-            border-radius: 12px;
-            padding: 20px 12px;
-            margin: 8px 0;
-            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
-            min-height: 150px;
-            height: 150px;
-            display: flex;
-            flex-direction: column;
-            justify-content: center;
-            align-items: center;
-            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-        '>
-            <div style='font-size: 13px; color: #444; font-weight: 600; margin-bottom: 8px;'>{label}</div>
-            <div style='font-size: 36px; font-weight: bold; color: {color};'>{value}%</div>
+        <div style='text-align:center; background-color:{bg_color}; border-radius:12px; padding:14px; margin:8px 0; min-height:120px; display:flex; flex-direction:column; justify-content:center; align-items:center;'>
+            <div style='font-size:13px; color:#444; font-weight:600; margin-bottom:6px;'>{label}</div>
+            <div style='font-size:32px; font-weight:bold; color:{color};'>{value}%</div>
         </div>
     """, unsafe_allow_html=True)
 
-# ----------------------------------------------------------------------
-# HCP SECTION
-# ----------------------------------------------------------------------
-def render_hcp_section(data):
-    st.markdown("### TOTAL HCPs EDUCATED in GX")
-    hcp_educated = st.number_input("Running Total", min_value=0, value=int(float(data["hcp_educated"])), key="hcp_educated_input")
-    if "hcp_educated_input" in st.session_state and st.session_state.hcp_educated_input != data["hcp_educated"]:
-        update_value(data, "hcp_educated", st.session_state.hcp_educated_input)
+# ------------------------------
+# SECTION RENDERS
+# ------------------------------
 
+def render_hcp_section(data: Dict[str, Any]):
+    st.markdown("### TOTAL HCPs EDUCATED in GX")
+    hcp_val = int(float(data.get("hcp_educated", 0)))
+    new_hcp = st.number_input("Running Total", min_value=0, value=hcp_val, key="hcp_educated_input")
+    if st.session_state.get("hcp_educated_input") != hcp_val:
+        st.session_state.modified = True
     c1, c2, c3, c4 = st.columns(4)
     with c1: render_metric_card("Confidence<br>Diagnosing", int(float(data.get("confidence_diagnosing", 0))), "#1f77b4", "#f0f8ff")
     with c2: render_metric_card("Confidence<br>Treating", int(float(data.get("confidence_treating", 0))), "#ff7f0e", "#fff8f0")
@@ -78,117 +189,113 @@ def render_hcp_section(data):
     with c4: render_metric_card("Intent<br>to Test", int(float(data.get("intent_to_test", 0))), "#d62728", "#fff0f0")
 
     st.markdown("#### Practice Type")
-    practice_data = {
-        "hcp_family": st.number_input("Family", min_value=0, value=int(float(data["hcp_family"])), key="hcp_family"),
-        "hcp_internal": st.number_input("Internal", min_value=0, value=int(float(data["hcp_internal"])), key="hcp_internal"),
-        "hcp_general": st.number_input("General", min_value=0, value=int(float(data["hcp_general"])), key="hcp_general"),
-    }
-    for key in practice_data:
-        if key in st.session_state and st.session_state[key] != data[key]:
-            update_value(data, key, st.session_state[key])
+    cols = st.columns(3)
+    keys = ["hcp_family", "hcp_internal", "hcp_general"]
+    practice_vals = {}
+    for key, col in zip(keys, cols):
+        with col:
+            val = int(float(data.get(key, 0)))
+            practice_vals[key] = st.number_input(key.replace("hcp_", "").capitalize(), min_value=0, value=val, key=f"inp_{key}")
+            if st.session_state.get(f"inp_{key}") != val:
+                st.session_state.modified = True
+    practice_df = pd.DataFrame({"Type": ["Family", "Internal", "General"], "Count": list(practice_vals.values())})
+    fig = px.bar(practice_df, x="Count", y="Type", orientation="h", text="Count")
+    fig.update_layout(showlegend=False, margin=dict(l=0, r=0, t=0, b=0), height=220)
+    st.plotly_chart(fig, use_container_width=True)
 
-    practice_df = pd.DataFrame({
-        "Type": ["Family", "Internal", "General"],
-        "Count": [practice_data["hcp_family"], practice_data["hcp_internal"], practice_data["hcp_general"]]
-    })
-    fig_practice = px.bar(practice_df, x="Count", y="Type", orientation='h', color="Type", text="Count")
-    fig_practice.update_layout(showlegend=False, height=220, margin=dict(l=0, r=0, t=0, b=0))
-    st.plotly_chart(fig_practice, use_container_width=True)
 
-# ----------------------------------------------------------------------
-# ATTENDEES SECTION
-# ----------------------------------------------------------------------
-def render_attendees_section(data):
+def render_attendees_section(data: Dict[str, Any]):
     st.markdown("### TOTAL ATTENDEES EDUCATED in GX")
-    attendees = st.number_input("Running Total", min_value=0, value=int(float(data["attendees_educated"])), key="attendees")
-    if "attendees" in st.session_state and st.session_state.attendees != data["attendees_educated"]:
-        update_value(data, "attendees_educated", st.session_state.attendees)
+    curr = int(float(data.get("attendees_educated", 0)))
+    val = st.number_input("Running Total", min_value=0, value=curr, key="inp_attendees")
+    if st.session_state.get("inp_attendees") != curr:
+        st.session_state.modified = True
 
-def render_demographics_section(data):
+
+def render_demographics_section(data: Dict[str, Any]):
     st.markdown("#### Demographics")
-    demo_inputs = {
-        "demo_black": st.number_input("Black %", min_value=0, max_value=100, value=int(float(data["demo_black"])), key="demo_b"),
-        "demo_hispanic": st.number_input("Hispanic %", min_value=0, max_value=100, value=int(float(data["demo_hispanic"])), key="demo_h"),
-        "demo_white": st.number_input("White %", min_value=0, max_value=100, value=int(float(data["demo_white"])), key="demo_w"),
-        "demo_other": st.number_input("Other %", min_value=0, max_value=100, value=int(float(data["demo_other"])), key="demo_o"),
-    }
-    for (key, _), sk in zip(demo_inputs.items(), ["demo_b", "demo_h", "demo_w", "demo_o"]):
-        if sk in st.session_state and st.session_state[sk] != data[key]:
-            update_value(data, key, st.session_state[sk])
+    demo_keys = ["demo_black", "demo_hispanic", "demo_white", "demo_other"]
+    labels = ["Black %", "Hispanic %", "White %", "Other %"]
+    demo_vals = {}
+    cols = st.columns(4)
+    for key, label, col in zip(demo_keys, labels, cols):
+        with col:
+            val = int(float(data.get(key, 0)))
+            demo_vals[key] = st.number_input(label, min_value=0, max_value=100, value=val, key=f"inp_{key}")
+            if st.session_state.get(f"inp_{key}") != val:
+                st.session_state.modified = True
 
-    demo_df = pd.DataFrame({
-        "Group": ["Black/African American", "Hispanic/Latino", "White/Caucasian", "Other"],
-        "Percent": list(demo_inputs.values())
-    })
-    total = demo_df["Percent"].sum()
-    if total != 100:
+    df = pd.DataFrame({"Group": ["Black/African American", "Hispanic/Latino", "White/Caucasian", "Other"], "Percent": list(demo_vals.values())})
+    total = df["Percent"].sum()
+    if total != 100 and total > 0:
         st.warning(f"Sum: {total}%. Normalizing...")
-        demo_df["Percent"] = (demo_df["Percent"] / total * 100).round(1)
+        df["Percent"] = (df["Percent"] / total * 100).round(1)
+    fig = px.bar(df, x="Percent", y="Group", orientation="h", text="Percent")
+    fig.update_layout(showlegend=False, margin=dict(l=0, r=0, t=0, b=0), height=240)
+    st.plotly_chart(fig, use_container_width=True)
 
-    fig_demo = px.bar(demo_df, x="Percent", y="Group", orientation='h', color="Group", text="Percent")
-    fig_demo.update_layout(showlegend=False, height=240, margin=dict(l=0, r=0, t=0, b=0))
-    st.plotly_chart(fig_demo, use_container_width=True)
 
-def render_age_gender_section(data):
+def render_age_gender_section(data: Dict[str, Any]):
     col_age, col_gender = st.columns(2)
     with col_age:
         st.markdown("**Age Distribution**")
-        age_inputs = {
-            "age_55_plus": st.number_input("55+ yrs", min_value=0, value=int(float(data.get("age_55_plus", 0))), key="age55"),
-            "age_35_54": st.number_input("35-54 yrs", min_value=0, value=int(float(data.get("age_35_54", 0))), key="age35"),
-            "age_18_34": st.number_input("18-34 yrs", min_value=0, value=int(float(data.get("age_18_34", 0))), key="age18"),
-        }
-        for k, sk in zip(age_inputs, ["age55", "age35", "age18"]):
-            if sk in st.session_state and st.session_state[sk] != data.get(k):
-                update_value(data, k, st.session_state[sk])
-
-        age_df = pd.DataFrame({"Age": ["55+ yrs", "35-54 yrs", "18-34 yrs"], "Count": list(age_inputs.values())})
-        fig_age = px.pie(age_df, values="Count", names="Age", hole=0.4, color_discrete_sequence=px.colors.sequential.Blues_r)
-        fig_age.update_traces(textposition="inside", textinfo="percent+label", textfont_size=18, pull=[0.07, 0.07, 0.07])
-        fig_age.update_layout(height=560, width=560, margin=dict(l=20, r=20, t=40, b=20),
-                              legend=dict(orientation="v", yanchor="middle", y=0.5, xanchor="left", x=1.02, font=dict(size=14)))
-        st.plotly_chart(fig_age, use_container_width=False)
+        age_keys = ["age_55_plus", "age_35_54", "age_18_34"]
+        age_labels = ["55+ yrs", "35-54 yrs", "18-34 yrs"]
+        age_vals = {}
+        for key, label in zip(age_keys, age_labels):
+            val = int(float(data.get(key, 0)))
+            age_vals[key] = st.number_input(label, min_value=0, value=val, key=f"inp_{key}")
+            if st.session_state.get(f"inp_{key}") != val:
+                st.session_state.modified = True
+        age_df = pd.DataFrame({"Age": age_labels, "Count": list(age_vals.values())})
+        fig = px.pie(age_df, values="Count", names="Age", hole=0.4)
+        fig.update_traces(textposition="inside", textinfo="percent+label")
+        fig.update_layout(height=420, margin=dict(l=20, r=20, t=20, b=20))
+        st.plotly_chart(fig, use_container_width=False)
 
     with col_gender:
         st.markdown("**Gender**")
-        male = st.number_input("Male %", min_value=0, max_value=100, value=int(float(data.get("gender_male", 0))), key="male")
-        if "male" in st.session_state and st.session_state.male != data.get("gender_male"):
-            update_value(data, "gender_male", st.session_state.male)
-        female = 100 - male
-        fig_gender = px.pie(values=[male, female], names=["Male", "Female"], hole=0.4, color_discrete_sequence=["#1f77b4", "#ff7f0e"])
-        fig_gender.update_traces(textposition="inside", textinfo="percent+label", textfont_size=18, pull=[0.07, 0.07])
-        fig_gender.update_layout(height=560, width=560, margin=dict(l=20, r=20, t=40, b=20),
-                                 legend=dict(orientation="v", yanchor="middle", y=0.5, xanchor="left", x=1.02, font=dict(size=14)))
-        st.plotly_chart(fig_gender, use_container_width=False)
+        male_val = int(float(data.get("gender_male", 0)))
+        male = st.number_input("Male %", min_value=0, max_value=100, value=male_val, key="inp_gender_male")
+        if st.session_state.get("inp_gender_male") != male_val:
+            st.session_state.modified = True
+        female = max(0, 100 - male)
+        fig = px.pie(values=[male, female], names=["Male", "Female"], hole=0.4)
+        fig.update_traces(textposition="inside", textinfo="percent+label")
+        fig.update_layout(height=420, margin=dict(l=20, r=20, t=20, b=20))
+        st.plotly_chart(fig, use_container_width=False)
 
-def render_knowledge_intent_section(data):
+
+def render_knowledge_intent_section(data: Dict[str, Any]):
     st.markdown("#### Knowledge / Intent")
-    k1, k2, k3, k4 = st.columns(4)
-    metrics = [
-        ("aware_ldlc", "aware", "LDL-c<br>Awareness", "#1f77b4", "#f0f8ff", k1),
-        ("understand_risk", "risk", "LDL-c Risk<br>Understanding", "#ff7f0e", "#fff8f0", k2),
-        ("intent_test", "intent_test", "Intent<br>to Test", "#2ca02c", "#f0fff0", k3),
-        ("intent_followup", "followup", "Intent to<br>Follow-up", "#d62728", "#fff0f0", k4),
+    col1, col2, col3, col4 = st.columns(4)
+    metric_info = [
+        ("aware_ldlc", "LDL-c Awareness"),
+        ("understand_risk", "LDL-c Risk Understanding"),
+        ("intent_test", "Intent to Test"),
+        ("intent_followup", "Intent to Follow-up"),
     ]
-    for dkey, skey, label, col, bg, col_obj in metrics:
-        with col_obj:
-            val = st.number_input(f"{label.replace('<br>', ' ')} %", min_value=0, max_value=100, value=int(float(data[dkey])), key=skey, label_visibility="collapsed")
-            if skey in st.session_state and st.session_state[skey] != data[dkey]:
-                update_value(data, dkey, st.session_state[skey])
-            render_metric_card(label, val, col, bg)
+    for (key, label), col in zip(metric_info, [col1, col2, col3, col4]):
+        with col:
+            val = int(float(data.get(key, 0)))
+            rv = st.number_input(label + " %", min_value=0, max_value=100, value=val, key=f"inp_{key}")
+            if st.session_state.get(f"inp_{key}") != val:
+                st.session_state.modified = True
+            render_metric_card(label, rv)
 
-# ----------------------------------------------------------------------
-# LDL-C MATRIX (FIXED: Full 2-decimal display)
-# ----------------------------------------------------------------------
-def render_ldlc_matrix(data):
+
+def render_ldlc_matrix(data: Dict[str, Any]):
     st.markdown("#### LDL-c (mg/dL) Distribution")
-    matrix = pd.DataFrame({
-        "Range": ["0-54", "55-70", "70-99", "100-139", "140-189", ">=190"],
-        "Value": [
-            data["ldlc_0_54"], data["ldlc_55_70"], data["ldlc_70_99"],
-            data["ldlc_100_139"], data["ldlc_140_189"], data["ldlc_190_plus"]
-        ]
-    })
+    rows = [
+        ["0-54", float(data.get("ldlc_0_54", 0))],
+        ["55-70", float(data.get("ldlc_55_70", 0))],
+        ["70-99", float(data.get("ldlc_70_99", 0))],
+        ["100-139", float(data.get("ldlc_100_139", 0))],
+        ["140-189", float(data.get("ldlc_140_189", 0))],
+        [">=190", float(data.get("ldlc_190_plus", 0))],
+    ]
+    matrix = pd.DataFrame(rows, columns=["Range", "Value"])
+
     gb = AgGrid(
         matrix,
         editable=True,
@@ -197,7 +304,8 @@ def render_ldlc_matrix(data):
         update_mode=GridUpdateMode.MODEL_CHANGED,
         data_return_mode=DataReturnMode.AS_INPUT,
     )
-    edited = gb["data"]
+    edited = pd.DataFrame(gb["data"])
+    # Normalize to 100 if needed
     total = edited["Value"].sum()
     if total != 100 and total > 0:
         edited["Value"] = (edited["Value"] / total * 100).round(2)
@@ -206,93 +314,117 @@ def render_ldlc_matrix(data):
         "0-54": "ldlc_0_54", "55-70": "ldlc_55_70", "70-99": "ldlc_70_99",
         "100-139": "ldlc_100_139", "140-189": "ldlc_140_189", ">=190": "ldlc_190_plus"
     }
+    # store edited values into session state so Save button can persist them in one batch
     for _, row in edited.iterrows():
         key = range_to_key[row["Range"]]
-        if data.get(key) != row["Value"]:
-            update_value(data, key, row["Value"])
+        st.session_state[f"inp_{key}"] = float(row["Value"])
 
-    def color_ldlc(val):
-        if val <= 0.75: return "background-color: #d4edda"
-        elif val <= 1.25: return "background-color: #c3e6cb"
-        else: return "background-color: #bbe5b3"
+    st.table(edited.style.format({"Value": "{:.2f}"}))
 
-    # Force 2-decimal formatting to prevent truncation
-    styled = (
-        edited
-        .style
-        .format({"Value": "{:.2f}"})   # <-- Ensures 25.64 shows fully
-        .applymap(color_ldlc, subset=["Value"])
-    )
-    st.table(styled)
+# ------------------------------
+# MAIN
+# ------------------------------
 
-# =============================================================================
-# MAIN APP
-# =============================================================================
+def collect_changes_into_dict(original: Dict[str, Any]) -> Dict[str, Any]:
+    """Build a new data dict from original + any inputs present in session_state."""
+    out = original.copy()
+    # general keys we used with prefix inp_
+    for k in list(out.keys()):
+        sk = f"inp_{k}"
+        if sk in st.session_state:
+            # try cast numbers where appropriate
+            val = st.session_state[sk]
+            try:
+                if isinstance(out[k], int):
+                    out[k] = int(val)
+                elif isinstance(out[k], float):
+                    out[k] = float(val)
+                else:
+                    out[k] = val
+            except Exception:
+                out[k] = val
+    # hcp_educated special
+    if "hcp_educated_input" in st.session_state:
+        try:
+            out["hcp_educated"] = int(st.session_state["hcp_educated_input"])
+        except Exception:
+            pass
+    return out
+
+
 def main():
     st.set_page_config(page_title="GX Activations Dashboard", layout="wide")
-    data = load_data()
+    st.title("GX ACTIVATIONS (CITIES) – Real-time Dashboard")
 
-    st.markdown("<h1 style='text-align: center;'>GX ACTIVATIONS (CITIES) – Real-time Dashboard</h1>", unsafe_allow_html=True)
-    st.markdown("---")
+    # Load data (cached)
+    data = load_data_from_sheet()
 
-    col_title, col_toggle = st.columns([6, 1])
-    with col_toggle:
-        dark_mode = st.toggle("Dark Mode", value=False)
+    # small toolbar
+    col1, col2, col3 = st.columns([4, 1, 1])
+    with col3:
+        if st.button("🔄 Reload now"):
+            load_data_from_sheet.clear()
+            st.experimental_rerun()
+    with col2:
+        auto_refresh = st.checkbox("Auto-refresh 30s", value=True)
 
-    # === SMOOTH AUTO-REFRESH WITH COUNTDOWN ===
-    col_refresh, col_download = st.columns([3, 1])
-    with col_refresh:
-        auto_refresh = st.checkbox("Auto-refresh every 30s", value=True)
-
-    timer_placeholder = st.empty()
-
+    # Auto refresh logic (non-blocking) — stores last refresh time in session_state
     if auto_refresh:
-        if 'last_refresh' not in st.session_state:
+        last = st.session_state.get("last_refresh", 0)
+        if time.time() - last > 30:
             st.session_state.last_refresh = time.time()
-        if 'refresh_countdown' not in st.session_state:
-            st.session_state.refresh_countdown = 30
+            load_data_from_sheet.clear()
+            # don't immediately rerun to avoid infinite loops, but update 'data' ref
+            data = load_data_from_sheet()
 
-        elapsed = time.time() - st.session_state.last_refresh
-        remaining = max(0, 30 - int(elapsed))
+    # track whether user has made any edits
+    if "modified" not in st.session_state:
+        st.session_state.modified = False
 
-        if remaining == 0:
-            st.session_state.last_refresh = time.time()
-            st.session_state.refresh_countdown = 30
-            st.rerun()
-        else:
-            st.session_state.refresh_countdown = remaining
-            timer_placeholder.markdown(f"**Refreshing in {remaining}s...**")
+    # Render sections
+    st.markdown("---")
+    render_hcp_section(data)
+    st.markdown("---")
+    render_attendees_section(data)
+    render_demographics_section(data)
+    render_age_gender_section(data)
+    render_knowledge_intent_section(data)
+    st.markdown("---")
+    render_ldlc_matrix(data)
 
-    # === DOWNLOAD BUTTON ===
-    with col_download:
-        csv_data = pd.Series(data).to_csv().encode()
-        st.download_button(
-            "Download Data",
-            data=csv_data,
-            file_name=f"gx_dashboard_{pd.Timestamp.now().strftime('%Y%m%d_%H%M')}.csv",
-            mime="text/csv"
-        )
+    st.markdown("---")
+    cols = st.columns([1, 1, 1, 6])
+    save_col, reset_col, info_col, _ = cols
 
-    # === LAYOUT ===
-    col_left, col_right = st.columns([1, 1])
-    with col_left:
-        render_attendees_section(data)
-        st.markdown("---")
-        render_demographics_section(data)
-        st.markdown("---")
-        render_age_gender_section(data)
-        st.markdown("---")
-        render_knowledge_intent_section(data)
+    with save_col:
+        if st.button("💾 Save to Google Sheets"):
+            new_data = collect_changes_into_dict(data)
+            success = save_data_to_sheet(new_data)
+            if success:
+                st.success("✅ Data saved successfully!")
+                st.session_state.modified = False
+                # refresh cached data
+                load_data_from_sheet.clear()
+    with reset_col:
+        if st.button("↺ Reset (discard local edits)"):
+            # clear input keys we created
+            keys_to_remove = [k for k in st.session_state.keys() if k.startswith("inp_") or k == "hcp_educated_input"]
+            for k in keys_to_remove:
+                del st.session_state[k]
+            st.session_state.modified = False
+            load_data_from_sheet.clear()
+            st.experimental_rerun()
 
-    with col_right:
-        render_hcp_section(data)
-        st.markdown("---")
-        render_ldlc_matrix(data)
+    # Inform user about unsaved changes
+    if st.session_state.modified:
+        st.warning("You have unsaved changes. Click 'Save to Google Sheets' to persist them.")
 
-    st.caption("*All percentages reflect the percent increase from pre-survey to post-survey results.")
+    # Debug / admin: show loaded secrets present (do not show in public)
+    if st.sidebar.checkbox("Show debug info"):
+        st.sidebar.write("Loaded data keys:", list(data.keys()))
+        st.sidebar.write("st.secrets contains gcp_service_account:", "gcp_service_account" in st.secrets)
 
-# =============================================================================
-# RUN
-# =============================================================================
+
 if __name__ == "__main__":
     main()
+
