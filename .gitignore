@@ -1,0 +1,11 @@
+# Streamlit
+.streamlit/secrets.toml
+__pycache__/
+*.pyc
+
+# VS Code
+.vscode/
+
+# Environment
+venv/
+env/
