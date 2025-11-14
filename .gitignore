@@ -1,11 +1,13 @@
-# Streamlit
+# Streamlit secrets - NEVER PUSH
 .streamlit/secrets.toml
+
+# Python
 __pycache__/
 *.pyc
 
 # VS Code
 .vscode/
 
-# Environment
+# Environments
 venv/
 env/
